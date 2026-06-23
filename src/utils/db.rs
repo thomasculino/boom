@@ -118,6 +118,26 @@ pub async fn initialize_survey_indexes(
         create_index(&alerts_aux_collection, index, false).await?;
     }
 
+    // if survey is ZTF, index the nearest-known-SSO designation (ssnamenr) together with its
+    // distance (ssdistnr), so a moving object can be looked up by designation without a spatial
+    // query. Both fields are indexed together (and queried via $elemMatch) because ssnamenr
+    // alone only means "nearest known SSO within 30 arcsec" — ssdistnr must also be checked, on
+    // the same prv_candidates/prv_nondetections entry, to confirm the alert is actually that
+    // object rather than merely near it.
+    if survey == &Survey::Ztf {
+        let index = doc! {
+            "prv_candidates.ssnamenr": 1,
+            "prv_candidates.ssdistnr": 1,
+        };
+        create_index(&alerts_aux_collection, index, false).await?;
+
+        let index = doc! {
+            "prv_nondetections.ssnamenr": 1,
+            "prv_nondetections.ssdistnr": 1,
+        };
+        create_index(&alerts_aux_collection, index, false).await?;
+    }
+
     Ok(())
 }
 

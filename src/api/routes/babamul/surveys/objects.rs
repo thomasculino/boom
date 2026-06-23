@@ -1,6 +1,7 @@
 use crate::alert::{
     LsstCandidate, LsstForcedPhot, LsstObject, LsstPrvCandidate, ZtfCandidate, ZtfForcedPhot,
     ZtfObject, ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
+    ZTF_POSITION_UNCERTAINTY,
 };
 use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
@@ -498,6 +499,10 @@ fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
 #[derive(Debug, serde::Deserialize)]
 pub struct SearchObjectsQuery {
     object_id: Option<String>,
+    /// MPC provisional/permanent designation of a Solar System (moving) object. Looked up
+    /// independently against LSST (`designation`) and ZTF (`ssnamenr`) — an object may exist in
+    /// only one of the two surveys, so results from each are returned as-is, not merged.
+    designation: Option<String>,
     ra: Option<f64>,
     dec: Option<f64>,
     radius: Option<f64>,
@@ -527,15 +532,19 @@ struct ObjectMini {
     coordinates: Coordinates,
 }
 
-/// Search for objects by partial object ID or sky position across surveys.
+/// Search for objects by partial object ID, Solar System object designation, or sky position
+/// across surveys.
 ///
-/// Provide either `object_id` (survey is auto-inferred) or all three of `ra` / `dec` / `radius`
-/// for a cross-survey cone search over both ZTF and LSST. The two modes are mutually exclusive.
+/// Provide exactly one of: `object_id` (survey is auto-inferred), `designation` (looked up
+/// independently against LSST and ZTF, since a moving object may only exist in one of the two),
+/// or all three of `ra` / `dec` / `radius` for a cross-survey cone search. The modes are
+/// mutually exclusive.
 #[utoipa::path(
     get,
     path = "/babamul/objects",
     params(
-        ("object_id" = Option<String>, Query, description = "Partial object ID to search for (mutually exclusive with ra/dec/radius)"),
+        ("object_id" = Option<String>, Query, description = "Partial object ID to search for (mutually exclusive with designation and ra/dec/radius)"),
+        ("designation" = Option<String>, Query, description = "MPC designation of a Solar System object to search for (mutually exclusive with object_id and ra/dec/radius)"),
         ("ra" = Option<f64>, Query, description = "Right ascension in degrees [0, 360) for cone search"),
         ("dec" = Option<f64>, Query, description = "Declination in degrees [-90, 90] for cone search"),
         ("radius" = Option<f64>, Query, description = "Search radius in arcseconds (0, 600] for cone search"),
@@ -568,13 +577,94 @@ pub async fn get_objects(
     };
 
     let has_object_id = query.object_id.is_some();
+    let has_designation = query.designation.is_some();
     let has_position = query.ra.is_some() || query.dec.is_some() || query.radius.is_some();
 
-    if has_object_id && has_position {
-        return response::bad_request("Provide either object_id or ra/dec/radius, not both");
+    if (has_object_id as u8 + has_designation as u8 + has_position as u8) > 1 {
+        return response::bad_request(
+            "Provide only one of: object_id, designation, or ra/dec/radius",
+        );
     }
-    if !has_object_id && !has_position {
-        return response::bad_request("Must provide either object_id or ra/dec/radius");
+    if !has_object_id && !has_designation && !has_position {
+        return response::bad_request("Must provide one of: object_id, designation, ra/dec/radius");
+    }
+
+    if has_designation {
+        let designation = query.designation.as_deref().unwrap();
+        let mut results: Vec<SearchObjectResult> = vec![];
+
+        let lsst_collection = db.collection::<ObjectMini>("LSST_alerts_aux");
+        match lsst_collection
+            .find(doc! { "designation": designation })
+            .limit(limit)
+            .await
+        {
+            Ok(mut cursor) => {
+                while let Ok(Some(obj)) = cursor.try_next().await {
+                    let (ra, dec) = obj.coordinates.get_radec();
+                    results.push(SearchObjectResult {
+                        object_id: obj.object_id,
+                        ra,
+                        dec,
+                        survey: Survey::Lsst,
+                        distance_arcsec: None,
+                    });
+                }
+            }
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error searching LSST objects by designation: {}",
+                    error
+                ));
+            }
+        }
+
+        // `ssnamenr` is ZTF's *nearest* known Solar System object within 30 arcsec of the
+        // detection — it does not mean the detection actually is that object (e.g. a transient
+        // or artifact that happens to fall near a catalogued asteroid's track would also get a
+        // non-null ssnamenr). `ssdistnr` is the distance to that nearest object; a genuine
+        // detection of the named object should agree with its predicted position to within
+        // ZTF's own astrometric uncertainty, so we require ssdistnr to be within
+        // ZTF_POSITION_UNCERTAINTY (the same threshold used for real cross-survey matches)
+        // before treating the designation match as trustworthy. $elemMatch is required so both
+        // conditions are checked against the *same* prv_candidates/prv_nondetections entry.
+        let ss_elem_match = doc! {
+            "ssnamenr": designation,
+            "ssdistnr": { "$lte": ZTF_POSITION_UNCERTAINTY },
+        };
+        let ztf_collection = db.collection::<ObjectMini>("ZTF_alerts_aux");
+        match ztf_collection
+            .find(doc! {
+                "$or": [
+                    { "prv_candidates": { "$elemMatch": ss_elem_match.clone() } },
+                    { "prv_nondetections": { "$elemMatch": ss_elem_match } },
+                ]
+            })
+            .limit(limit)
+            .await
+        {
+            Ok(mut cursor) => {
+                while let Ok(Some(obj)) = cursor.try_next().await {
+                    let (ra, dec) = obj.coordinates.get_radec();
+                    results.push(SearchObjectResult {
+                        object_id: obj.object_id,
+                        ra,
+                        dec,
+                        survey: Survey::Ztf,
+                        distance_arcsec: None,
+                    });
+                }
+            }
+            Err(error) => {
+                return response::internal_error(&format!(
+                    "error searching ZTF objects by designation: {}",
+                    error
+                ));
+            }
+        }
+
+        results.truncate(limit as usize);
+        return response::ok_ser(&format!("Found {} objects", results.len()), results);
     }
 
     if has_object_id {

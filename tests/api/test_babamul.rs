@@ -1156,6 +1156,244 @@ mod tests {
         lsst_aux.delete_one(doc! { "_id": &lsst_id }).await.ok();
     }
 
+    /// Test GET /babamul/objects?designation=... — a moving object may exist in only one
+    /// survey, both, or neither; each case should be handled independently.
+    #[actix_rt::test]
+    async fn test_get_objects_by_designation() {
+        use boom::alert::ZtfPrvCandidate;
+        use boom::utils::lightcurves::Band;
+        use boom::utils::spatial::Coordinates;
+
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let lsst_only_designation = format!("lsst-only-{}", unique_suffix);
+        let ztf_only_designation = format!("ztf-only-{}", unique_suffix);
+        let both_designation = format!("both-{}", unique_suffix);
+
+        let lsst_aux: mongodb::Collection<boom::alert::LsstObject> =
+            database.collection("LSST_alerts_aux");
+        let ztf_aux: mongodb::Collection<boom::alert::ZtfObject> =
+            database.collection("ZTF_alerts_aux");
+
+        let lsst_only_id = format!("LSSTonly{}", unique_suffix);
+        let lsst_both_id = format!("LSSTboth{}", unique_suffix);
+        let ztf_only_id = format!("ZTF24only{}", unique_suffix);
+        let ztf_both_id = format!("ZTF24both{}", unique_suffix);
+
+        lsst_aux
+            .insert_one(boom::alert::LsstObject {
+                object_id: lsst_only_id.clone(),
+                coordinates: Coordinates::new(10.0, 10.0),
+                prv_candidates: vec![],
+                fp_hists: vec![],
+                is_sso: true,
+                designation: Some(lsst_only_designation.clone()),
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert LSST-only test object");
+
+        lsst_aux
+            .insert_one(boom::alert::LsstObject {
+                object_id: lsst_both_id.clone(),
+                coordinates: Coordinates::new(20.0, 20.0),
+                prv_candidates: vec![],
+                fp_hists: vec![],
+                is_sso: true,
+                designation: Some(both_designation.clone()),
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert LSST test object sharing a designation with ZTF");
+
+        let ztf_prv_candidate = ZtfPrvCandidate {
+            prv_candidate: boom::alert::PrvCandidate {
+                ssnamenr: Some(ztf_only_designation.clone()),
+                ssdistnr: Some(0.5), // well within ZTF_POSITION_UNCERTAINTY: a genuine match
+                ..Default::default()
+            },
+            psf_flux: None,
+            psf_flux_err: None,
+            snr_psf: None,
+            ap_flux: None,
+            ap_flux_err: None,
+            snr_ap: None,
+            band: Band::G,
+        };
+        ztf_aux
+            .insert_one(boom::alert::ZtfObject {
+                object_id: ztf_only_id.clone(),
+                coordinates: Coordinates::new(30.0, 30.0),
+                prv_candidates: vec![ztf_prv_candidate],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert ZTF-only test object");
+
+        let ztf_prv_candidate_both = ZtfPrvCandidate {
+            prv_candidate: boom::alert::PrvCandidate {
+                ssnamenr: Some(both_designation.clone()),
+                ssdistnr: Some(0.5), // well within ZTF_POSITION_UNCERTAINTY: a genuine match
+                ..Default::default()
+            },
+            psf_flux: None,
+            psf_flux_err: None,
+            snr_psf: None,
+            ap_flux: None,
+            ap_flux_err: None,
+            snr_ap: None,
+            band: Band::G,
+        };
+        ztf_aux
+            .insert_one(boom::alert::ZtfObject {
+                object_id: ztf_both_id.clone(),
+                coordinates: Coordinates::new(40.0, 40.0),
+                prv_candidates: vec![ztf_prv_candidate_both],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert ZTF test object sharing a designation with LSST");
+
+        // ssnamenr is only the *nearest* known SSO within 30 arcsec — a large ssdistnr means
+        // this detection is NOT actually that object, just incidentally near its track. This
+        // must not show up as a designation match.
+        let false_positive_designation = format!("false-positive-{}", unique_suffix);
+        let ztf_false_positive_id = format!("ZTF24falsepos{}", unique_suffix);
+        let ztf_false_positive_candidate = ZtfPrvCandidate {
+            prv_candidate: boom::alert::PrvCandidate {
+                ssnamenr: Some(false_positive_designation.clone()),
+                ssdistnr: Some(25.0), // well beyond ZTF_POSITION_UNCERTAINTY: not a real match
+                ..Default::default()
+            },
+            psf_flux: None,
+            psf_flux_err: None,
+            snr_psf: None,
+            ap_flux: None,
+            ap_flux_err: None,
+            snr_ap: None,
+            band: Band::G,
+        };
+        ztf_aux
+            .insert_one(boom::alert::ZtfObject {
+                object_id: ztf_false_positive_id.clone(),
+                coordinates: Coordinates::new(50.0, 50.0),
+                prv_candidates: vec![ztf_false_positive_candidate],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .expect("Failed to insert ZTF test object with a distant (false-positive) ssnamenr");
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_objects),
+            ),
+        )
+        .await;
+
+        macro_rules! search_designation {
+            ($designation:expr) => {{
+                let req = test::TestRequest::get()
+                    .uri(&format!("/babamul/objects?designation={}", $designation))
+                    .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                    .to_request();
+                let resp = test::call_service(&app, req).await;
+                assert_eq!(resp.status(), StatusCode::OK);
+                let body = read_json_response(resp).await;
+                let ids: Vec<String> = body["data"]
+                    .as_array()
+                    .expect("data should be an array")
+                    .iter()
+                    .filter_map(|r| r["objectId"].as_str().map(|s| s.to_string()))
+                    .collect();
+                ids
+            }};
+        }
+
+        // LSST-only: should be found, no ZTF counterpart required
+        let ids = search_designation!(&lsst_only_designation);
+        assert_eq!(ids, vec![lsst_only_id.clone()]);
+
+        // ZTF-only: should be found, no LSST counterpart required
+        let ids = search_designation!(&ztf_only_designation);
+        assert_eq!(ids, vec![ztf_only_id.clone()]);
+
+        // Shared designation: both surveys' results should show up, independently
+        let mut ids = search_designation!(&both_designation);
+        ids.sort();
+        let mut expected = vec![lsst_both_id.clone(), ztf_both_id.clone()];
+        expected.sort();
+        assert_eq!(ids, expected);
+
+        // Unknown designation: no results, not an error
+        let ids = search_designation!("nonexistent-designation");
+        assert!(ids.is_empty());
+
+        // ssnamenr matching but ssdistnr too large: this is just the nearest known SSO to an
+        // unrelated detection, not a real identification — must not show up
+        let ids = search_designation!(&false_positive_designation);
+        assert!(
+            ids.is_empty(),
+            "ssnamenr match with large ssdistnr should be rejected as a false positive, got: {:?}",
+            ids
+        );
+
+        // designation is mutually exclusive with object_id and with position search
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/objects?designation={}&object_id=ZTF24abc",
+                &both_designation
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject designation combined with object_id"
+        );
+
+        // Clean up
+        lsst_aux
+            .delete_many(doc! { "_id": { "$in": [&lsst_only_id, &lsst_both_id] } })
+            .await
+            .ok();
+        ztf_aux
+            .delete_many(doc! {
+                "_id": { "$in": [&ztf_only_id, &ztf_both_id, &ztf_false_positive_id] }
+            })
+            .await
+            .ok();
+    }
+
     /// Test POST /babamul/kafka-credentials - Create a new Kafka credential
     /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
     #[actix_rt::test]
