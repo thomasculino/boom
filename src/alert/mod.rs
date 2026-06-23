@@ -19,5 +19,5 @@ pub use ztf::{
     deserialize_fp_hists, deserialize_prv_candidate, deserialize_prv_candidates, Candidate, FpHist,
     PrvCandidate, ZtfAlert, ZtfAlertWorker, ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfObject,
     ZtfPrvCandidate, ZtfRawAvroAlert, ZTF_DECAM_XMATCH_RADIUS, ZTF_DEC_RANGE,
-    ZTF_LSST_XMATCH_RADIUS,
+    ZTF_LSST_XMATCH_RADIUS, ZTF_POSITION_UNCERTAINTY,
 };
