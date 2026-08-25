@@ -10,8 +10,8 @@ use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag, ZTF_ZP,
+    analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band,
+    PerBandProperties, PhotometryMag, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
@@ -466,6 +466,9 @@ pub struct ZtfAlertProperties {
     /// Consumers must not read `None` as "not an asteroid".
     #[serde(default)]
     pub sso: Option<ZtfSsoAssociation>,
+    /// `None` on alerts enriched before this existed.
+    #[serde(default)]
+    pub activity: Option<ActivityMetrics>,
 }
 
 /// ZTF alert ML classifier scores
@@ -801,6 +804,7 @@ impl ZtfEnrichmentWorker {
             .as_deref()
             .and_then(|name| orbits.get(name));
 
+        let activity = ActivityMetrics::from_magnitudes(Some(candidate.magpsf), candidate.magap);
         let sso = ZtfSsoAssociation::from_ipac(
             candidate.ssnamenr.clone(),
             candidate.ssdistnr,
@@ -909,6 +913,7 @@ impl ZtfEnrichmentWorker {
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
                 sso: Some(sso),
+                activity: Some(activity),
             },
             all_bands_properties,
             programid,
