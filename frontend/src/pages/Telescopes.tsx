@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import NightGlobe from "@/components/telescopes/NightGlobe";
 import NightMap from "@/components/telescopes/NightMap";
 import NightTimeline from "@/components/telescopes/NightTimeline";
 import api, { type NightlyStat } from "@/lib/api";
@@ -148,6 +150,7 @@ function Legend() {
 export default function Telescopes() {
   const { timeRef, time, live, goLive, seek } = useClock();
   const [nights, setNights] = useState<NightlyStat[]>([]);
+  const [mapView, setMapView] = useState<"map" | "globe">("map");
 
   useEffect(() => {
     const load = () => {
@@ -184,11 +187,25 @@ export default function Telescopes() {
               <CardTitle>Telescopes</CardTitle>
               <CardDescription>Observatories whose alerts BOOM ingests</CardDescription>
             </div>
-            <Legend />
+            <div className="flex flex-col items-end gap-2">
+              <ToggleGroup
+                type="single"
+                size="sm"
+                variant="outline"
+                value={mapView}
+                onValueChange={(value) => value && setMapView(value as "map" | "globe")}
+              >
+                <ToggleGroupItem value="map" className="px-3">Map</ToggleGroupItem>
+                <ToggleGroupItem value="globe" className="px-3">Globe</ToggleGroupItem>
+              </ToggleGroup>
+              <Legend />
+            </div>
           </div>
         </CardHeader>
         <CardContent>
-          <NightMap sites={SITES} timeRef={timeRef} time={time} />
+          {mapView === "map"
+            ? <NightMap sites={SITES} timeRef={timeRef} time={time} />
+            : <NightGlobe sites={SITES} timeRef={timeRef} time={time} />}
         </CardContent>
       </Card>
 
